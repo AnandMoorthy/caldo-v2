@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState, useRef, useCallback } from "react";
 import { format, addMonths, subMonths, startOfMonth, endOfMonth, startOfWeek, endOfWeek, addDays, parseISO, isAfter, startOfDay, isToday } from "date-fns";
 import { motion } from "framer-motion";
-import { Plus, Check, StickyNote, List, Grip, Minimize2, ListX, CheckSquare, Sparkles } from "lucide-react";
+import { Plus, Check, StickyNote, List, Grip, Minimize2, ListX, CheckSquare, Sparkles, Target } from "lucide-react";
 import { auth, db, googleProvider, firebase } from "./firebase";
 import Header from "./components/Header.jsx";
 import Calendar from "./components/Calendar.jsx";
@@ -22,11 +22,12 @@ import NotesPage from "./components/NotesPage.jsx";
 import SnippetsPage from "./components/SnippetsPage.jsx";
 import SnippetsDrawer from "./components/SnippetsDrawer.jsx";
 import MomentsPage from "./components/MomentsPage.jsx";
+import HabitTracker from "./components/HabitTracker.jsx";
 import PublicSnippetView from "./components/PublicSnippetView.jsx";
 import FocusedSnippetView from "./components/FocusedSnippetView.jsx";
 import FocusedDayNoteView from "./components/FocusedDayNoteView.jsx";
 import FloatingPomodoro from "./components/FloatingPomodoro.jsx";
-import { loadTasks, saveTasks, loadStreak, saveStreak, loadDensityPreference, saveDensityPreference, loadRecurringSeries, saveRecurringSeries, loadViewPreference, saveViewPreference, loadSnippetsCache, saveSnippetsCache } from "./utils/storage";
+import { loadTasks, saveTasks, loadStreak, saveStreak, loadDensityPreference, saveDensityPreference, loadRecurringSeries, saveRecurringSeries, loadViewPreference, saveViewPreference, loadSnippetsCache, saveSnippetsCache, loadHabbits, saveHabbits } from "./utils/storage";
 import { generateId } from "./utils/uid";
 import { keyFor, monthKeyFromDate, monthKeyFromDateKey, getMonthMapFor } from "./utils/date";
 import { buildSearchIndex, searchTasks } from "./utils/search.js";
@@ -36,6 +37,7 @@ import { createTaskRepository } from "./services/repositories/taskRepository";
 import { createDayNoteRepository } from "./services/repositories/noteRepository";
 import { createSnippetRepository } from "./services/repositories/snippetRepository";
 import { createMomentRepository } from "./services/repositories/momentRepository";
+import { createHabitRepository } from "./services/repositories/habitRepository";
 import { materializeSeries } from "./utils/recurrence";
 
 
@@ -48,8 +50,11 @@ export default function App() {
   const [currentView, setCurrentView] = useState(() => (typeof window === 'undefined' ? 'month' : loadViewPreference()));
   const [activeTab, setActiveTab] = useState(() => {
     if (typeof window === 'undefined') return 'tasks';
-    try { return localStorage.getItem('caldo_v2_active_tab') || 'tasks'; } catch { return 'tasks'; }
-  }); // 'tasks' | 'notes' | 'moments'
+    try {
+      const stored = localStorage.getItem('caldo_v2_active_tab') || 'tasks';
+      return ['tasks', 'notes', 'moments', 'habits'].includes(stored) ? stored : 'tasks';
+    } catch { return 'tasks'; }
+  }); // 'tasks' | 'notes' | 'moments' | 'habits'
   const [cursor, setCursor] = useState(new Date());
   const [selectedDate, setSelectedDate] = useState(new Date());
   const [tasksMap, setTasksMap] = useState(() => loadTasks());
@@ -71,9 +76,12 @@ export default function App() {
   const noteRepoRef = useRef(null);
   const snippetRepoRef = useRef(null);
   const momentRepoRef = useRef(null);
+  const habitRepoRef = useRef(null);
+  const habitsSyncReadyRef = useRef(false);
   const [snippetsCache, setSnippetsCache] = useState(() => loadSnippetsCache());
   const [notesCache, setNotesCache] = useState(new Map()); // Cache for day notes
   const [momentsCache, setMomentsCache] = useState([]); // Cache for moments
+  const [habbits, setHabbits] = useState(() => loadHabbits());
   // profile menu moved into Header component
   const monthStart = startOfMonth(cursor);
   const monthEnd = endOfMonth(monthStart);
@@ -227,6 +235,15 @@ export default function App() {
   useEffect(() => {
     try { saveSnippetsCache(snippetsCache); } catch {}
   }, [snippetsCache]);
+
+  useEffect(() => {
+    try { saveHabbits(habbits); } catch {}
+    if (user && habitRepoRef.current && habitsSyncReadyRef.current) {
+      habitRepoRef.current.saveHabbits(habbits).catch((err) => {
+        console.error('Failed to sync habits to cloud', err);
+      });
+    }
+  }, [habbits]);
 
   // Notify other views (e.g., NotesPage) when snippets cache changes
   useEffect(() => {
@@ -578,11 +595,13 @@ export default function App() {
     const unsub = auth.onAuthStateChanged(async (u) => {
       setUser(u);
       if (u) {
+        habitsSyncReadyRef.current = false;
         // Initialize repositories for the new user
         taskRepoRef.current = createTaskRepository(u.uid);
         noteRepoRef.current = createDayNoteRepository(u.uid);
         snippetRepoRef.current = createSnippetRepository(u.uid);
         momentRepoRef.current = createMomentRepository(u.uid);
+        habitRepoRef.current = createHabitRepository(u.uid);
         // Warm snippet cache from cloud (non-blocking) and refresh local cache
         try {
           snippetRepoRef.current.listSnippets({ includeArchived: false, limit: 500 }).then((items) => setSnippetsCache(items)).catch(() => {});
@@ -592,6 +611,20 @@ export default function App() {
         try {
           momentRepoRef.current.fetchMoments({ limit: 500 }).then((items) => setMomentsCache(items)).catch(() => {});
         } catch {}
+
+        // Load habits cache and merge with local
+        try {
+          const cloudHabbits = await habitRepoRef.current.loadHabbits();
+          setHabbits((prev) => {
+            const merged = mergeHabbits(prev, cloudHabbits);
+            try { saveHabbits(merged); } catch {}
+            return merged;
+          });
+        } catch (err) {
+          console.error('Failed to load habits from cloud', err);
+        } finally {
+          habitsSyncReadyRef.current = true;
+        }
         
                 // Load current month from Firestore and merge with local
         try {
@@ -723,6 +756,9 @@ export default function App() {
         taskRepoRef.current = null;
         noteRepoRef.current = null;
         snippetRepoRef.current = null;
+        momentRepoRef.current = null;
+        habitRepoRef.current = null;
+        habitsSyncReadyRef.current = false;
         setSnippetsCache([]);
         setRecurringEnabled(false); // Disable recurring tasks when not logged in
         setDeleteAllTasksEnabled(false);
@@ -1006,6 +1042,68 @@ export default function App() {
       const hasNewNote = notesCache.has(dk) && notesCache.get(dk)?.content?.trim().length > 0;
       return hasLegacyNote || hasNewNote;
     } catch { return false; }
+  }
+
+  function addHabit(title) {
+    const trimmed = String(title || "").trim();
+    if (!trimmed) return;
+    setHabbits((prev) => [
+      {
+        id: generateId(),
+        title: trimmed,
+        history: {},
+        createdAt: new Date().toISOString(),
+      },
+      ...prev,
+    ]);
+  }
+
+  function toggleHabitForDay(habitId, dateKey) {
+    if (!habitId || !dateKey) return;
+    setHabbits((prev) =>
+      prev.map((habit) => {
+        if (habit.id !== habitId) return habit;
+        const history = habit.history && typeof habit.history === "object" ? habit.history : {};
+        const done = !!history[dateKey];
+        if (done) {
+          const { [dateKey]: _removed, ...rest } = history;
+          return { ...habit, history: rest };
+        }
+        return { ...habit, history: { ...history, [dateKey]: true } };
+      })
+    );
+  }
+
+  function deleteHabit(habitId) {
+    if (!habitId) return;
+    setHabbits((prev) => prev.filter((habit) => habit.id !== habitId));
+  }
+
+  function mergeHabbits(localItems, cloudItems) {
+    const localList = Array.isArray(localItems) ? localItems : [];
+    const cloudList = Array.isArray(cloudItems) ? cloudItems : [];
+    const byId = new Map();
+    for (const item of localList) {
+      if (!item?.id) continue;
+      byId.set(item.id, item);
+    }
+    for (const item of cloudList) {
+      if (!item?.id) continue;
+      const existing = byId.get(item.id);
+      if (!existing) {
+        byId.set(item.id, item);
+        continue;
+      }
+      byId.set(item.id, {
+        ...existing,
+        ...item,
+        history: {
+          ...(existing?.history && typeof existing.history === 'object' ? existing.history : {}),
+          ...(item?.history && typeof item.history === 'object' ? item.history : {}),
+        },
+      });
+    }
+    return Array.from(byId.values());
   }
 
   // Navigate to search result item
@@ -2211,6 +2309,12 @@ export default function App() {
       setShowEdit(false);
       setShowMissed(false);
       setSnippetsDrawerOpen(false);
+    } else if (activeTab === 'habits') {
+      setShowAdd(false);
+      setShowEdit(false);
+      setShowMissed(false);
+      setSnippetsDrawerOpen(false);
+      setShowNotes(false);
     }
   }, [activeTab]);
 
@@ -2533,6 +2637,15 @@ export default function App() {
             onMomentsChanged={(moments) => setMomentsCache(moments)}
           />
         )}
+
+        {activeTab === 'habits' && (
+          <HabitTracker
+            habits={habbits}
+            onAddHabit={addHabit}
+            onToggleHabitForDay={toggleHabitForDay}
+            onDeleteHabit={deleteHabit}
+          />
+        )}
         </div>
 
         {(snippetsDrawerOpen || showNotes) && (
@@ -2787,6 +2900,27 @@ export default function App() {
                 } ${iconAnimation.tab === 'moments' ? 'animate-[iconPulse_0.3s_ease-out]' : ''}`}
               />
               <span className={`text-[11px] font-semibold ${activeTab === 'moments' ? 'text-slate-900 dark:text-slate-100' : 'text-slate-500 dark:text-slate-400'}`}>Moments</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setIconAnimation({ tab: 'habits', key: Date.now() });
+                setActiveTab('habits');
+              }}
+              className={`relative flex flex-col items-center justify-center gap-1 flex-1 h-14 rounded-xl transition-all duration-200 touch-manipulation active:scale-95 ${
+                activeTab === 'habits'
+                  ? 'text-slate-900 dark:text-slate-100'
+                  : 'text-slate-500 dark:text-slate-400 active:bg-slate-50 dark:active:bg-slate-800/50'
+              }`}
+            >
+              <Target
+                size={20}
+                strokeWidth={activeTab === 'habits' ? 2.5 : 2}
+                className={`transition-all duration-200 ${
+                  activeTab === 'habits' ? 'text-slate-900 dark:text-slate-100' : 'text-slate-500 dark:text-slate-400'
+                } ${iconAnimation.tab === 'habits' ? 'animate-[iconPulse_0.3s_ease-out]' : ''}`}
+              />
+              <span className={`text-[11px] font-semibold ${activeTab === 'habits' ? 'text-slate-900 dark:text-slate-100' : 'text-slate-500 dark:text-slate-400'}`}>Habits</span>
             </button>
           </div>
         </div>

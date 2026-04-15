@@ -1,6 +1,6 @@
 import React from "react";
 import { motion } from "framer-motion";
-import { CheckSquare, StickyNote, Sparkles } from "lucide-react";
+import { CheckSquare, StickyNote, Sparkles, Target } from "lucide-react";
 
 export default function TabSwitcher({ activeTab, onChangeTab }) {
   const tabs = [
@@ -21,6 +21,12 @@ export default function TabSwitcher({ activeTab, onChangeTab }) {
       label: 'Moments',
       icon: Sparkles,
       shortLabel: 'Moments'
+    },
+    {
+      key: 'habits',
+      label: 'Habits',
+      icon: Target,
+      shortLabel: 'Habits'
     }
   ];
 

@@ -6,6 +6,7 @@ export const RECURRENCE_KEY = "caldo_v2_recurring_series";
 export const NOTES_MODE_KEY = "caldo_v2_notes_mode"; // 'edit' | 'preview'
 export const SNIPPETS_CACHE_KEY = "caldo_v2_snippets_cache";
 export const NOTES_FEED_CACHE_KEY = "caldo_v2_notes_feed_cache"; // merged notes+snippets feed
+export const HABBITS_KEY = "caldo_v2_habbits";
 
 export function loadTasks() {
   try {
@@ -156,6 +157,24 @@ export function saveNotesFeedCache(items) {
   try {
     const safe = Array.isArray(items) ? items : [];
     localStorage.setItem(NOTES_FEED_CACHE_KEY, JSON.stringify(safe));
+  } catch {}
+}
+
+export function loadHabbits() {
+  try {
+    const raw = localStorage.getItem(HABBITS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveHabbits(items) {
+  try {
+    const safe = Array.isArray(items) ? items : [];
+    localStorage.setItem(HABBITS_KEY, JSON.stringify(safe));
   } catch {}
 }
 
